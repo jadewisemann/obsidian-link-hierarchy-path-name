@@ -5,7 +5,9 @@ import {
     Notice,
     Plugin,
     TFile,
-    EventRef
+    EventRef,
+    PluginSettingTab,
+    Setting
 } from 'obsidian'
 
 const dedent = (strings: TemplateStringsArray, ...values: any[]): string => {
@@ -29,10 +31,23 @@ const dedent = (strings: TemplateStringsArray, ...values: any[]): string => {
     return lines.map(line => line.slice(minIndent)).join('\n')
 }
 
+interface PluginSettings {
+    newNotePath: string;
+}
+
+const DEFAULT_SETTINGS: PluginSettings = {
+    newNotePath: '/'
+}
+
 export default class InternalLinkCreator extends Plugin {
     private fileChangeRef: EventRef
+    settings: PluginSettings
 
     async onload() {
+        await this.loadSettings()
+
+        this.addSettingTab(new InternalLinkCreatorSettingTab(this.app, this))
+
         this.fileChangeRef = this.app.vault.on('modify', async (file: TFile) => {
             await this.handleFileChange(file)
         })
@@ -47,7 +62,6 @@ export default class InternalLinkCreator extends Plugin {
                     return
                 }
 
-                
                 try {
                     const currentFile = view.file
                     if (!currentFile) {
@@ -73,10 +87,17 @@ export default class InternalLinkCreator extends Plugin {
 
                     // 파일 경로 처리
                     const normalizedFileName = this.normalizeFileName(fileName)
-                    const filePath = `${normalizedFileName}.md`
+                    const basePath = this.settings.newNotePath.replace(/^\/+|\/+$/g, '') // 앞뒤 슬래시 제거
+                    const filePath = basePath 
+                        ? `${basePath}/${normalizedFileName}.md`
+                        : `${normalizedFileName}.md`
                     
+                    // 파일 생성
                     await this.app.vault.create(filePath, newNoteContent)
-                    editor.replaceSelection(`[[${fileName}|${displayName}]]`)
+
+                    // 링크 삽입 - 파일 이름만 사용
+                    const linkFileName = normalizedFileName.split('/').pop() || normalizedFileName
+                    editor.replaceSelection(`[[${linkFileName}|${displayName}]]`)
                     
                     new Notice('내부 링크가 생성되었습니다')
                 } catch (error) {
@@ -87,11 +108,18 @@ export default class InternalLinkCreator extends Plugin {
         })
     }
 
+    async loadSettings() {
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData())
+    }
+
+    async saveSettings() {
+        await this.saveData(this.settings)
+    }
+
     private normalizeFileName(fileName: string): string {
-        // 파일 이름에서 허용되지 않는 문자 처리
         return fileName.replace(/[\\/:*?"<>|]/g, '-')
                      .trim()
-                     .replace(/\s+/g, ' ') // 연속된 공백을 하나로
+                     .replace(/\s+/g, ' ')
     }
 
     private getDisplayName(fileName: string): string {
@@ -134,28 +162,25 @@ export default class InternalLinkCreator extends Plugin {
                 const prefix = fileNameParts.slice(0, -1).join('__')
                 const newFileName = prefix ? `${prefix}__${newTitle}` : newTitle
                 
-                // Update file name
                 const normalizedNewFileName = this.normalizeFileName(newFileName)
-                const newPath = `${normalizedNewFileName}.md`
+                const basePath = file.parent?.path || ''
+                const newPath = `${basePath}/${normalizedNewFileName}.md`
                 await this.app.fileManager.renameFile(file, newPath)
                 
-                // Update aliases in frontmatter
                 let updatedContent = content.replace(
                     /aliases: \[".+?"\]/,
                     `aliases: ["${newTitle}"]`
                 )
                 
-                // Update breadcrumb
                 const newBreadcrumb = this.getBreadcrumb(newFileName)
                 updatedContent = updatedContent.replace(
-                    /^.*>.*$/m,  // Matches the breadcrumb line
+                    /^.*>.*$/m,
                     newBreadcrumb
                 )
                 
                 await this.app.vault.modify(file, updatedContent)
                 
-                // Update links in other files
-                await this.updateLinksInFiles(file.basename, newFileName, newTitle)
+                await this.updateLinksInFiles(file.basename, normalizedNewFileName, newTitle)
             }
         }
     }
@@ -187,5 +212,33 @@ export default class InternalLinkCreator extends Plugin {
 
     onunload() {
         this.app.vault.offref(this.fileChangeRef)
+    }
+}
+
+class InternalLinkCreatorSettingTab extends PluginSettingTab {
+    plugin: InternalLinkCreator
+
+    constructor(app: App, plugin: InternalLinkCreator) {
+        super(app, plugin)
+        this.plugin = plugin
+    }
+
+    display() {
+        const {containerEl} = this
+
+        containerEl.empty()
+
+        containerEl.createEl('h2', {text: 'Internal Link Creator Settings'})
+
+        new Setting(containerEl)
+            .setName('New Note Location')
+            .setDesc('The folder path where new notes will be created (e.g., "folder/subfolder")')
+            .addText(text => text
+                .setPlaceholder('Enter folder path')
+                .setValue(this.plugin.settings.newNotePath)
+                .onChange(async (value) => {
+                    this.plugin.settings.newNotePath = value
+                    await this.plugin.saveSettings()
+                }))
     }
 }
